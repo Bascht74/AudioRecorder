@@ -1,0 +1,57 @@
+[Unit]
+Description=audiorec – automatischer Mehrspur-Recorder
+Documentation=file:/etc/audiorec/audiorec.conf
+After=local-fs.target sound.target
+Wants=sound.target
+
+# Ohne das gibt systemd nach 5 Startversuchen in 10 Sekunden endgültig
+# auf und der Dienst bleibt aus. Genau der Fall, den es nicht geben darf:
+# ein Fehler, der sich nach ein paar Sekunden von selbst erledigt (Gerät
+# noch nicht da, Datenträger noch nicht eingehängt), würde die Aufnahme
+# für den ganzen Abend verhindern.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/audiorec/audiorec.py
+Environment=AUDIOREC_CONFIG=/etc/audiorec/audiorec.conf
+Environment=PYTHONUNBUFFERED=1
+
+# /run/audiorec legt der Dienst selbst an.
+#
+# Bewusst KEIN RuntimeDirectory=: systemd würde den Ordner beim Stoppen
+# mitsamt status.json löschen. Die Anzeige fände dann nichts mehr vor und
+# meldete "KEIN STATUS" statt "GESTOPPT" – man würde einen Ausfall
+# vermuten, wo jemand nur bewusst gestoppt hat.
+
+# Nach einem Absturz sofort neu starten – die Aufnahme läuft danach
+# in einem neuen Session-Ordner weiter
+Restart=always
+RestartSec=3
+
+# Aufnahme etwas bevorzugt einplanen, damit sie unter Last nicht
+# als Erstes leidet
+Nice=-5
+IOSchedulingClass=realtime
+IOSchedulingPriority=2
+
+# arecord sauber beenden lassen (schliesst die WAV-Header korrekt)
+#
+# Der Dienst gibt jedem arecord bis zu 15 s auf SIGINT, dann 10 s auf
+# SIGTERM – und das nacheinander für jedes Gerät. Bei zwei Pulten sind
+# das im schlechtesten Fall 50 s. Mit den früheren 30 s hätte systemd
+# mittendrin SIGKILL geschickt: die letzte WAV behielte dann den
+# vorläufigen Kopf mit falscher Längenangabe.
+#
+# KillMode=mixed sorgt dafür, dass das Signal zuerst nur an den Dienst
+# geht und nicht sofort an alle arecord-Prozesse der Gruppe – sonst
+# stirbt arecord, bevor der Dienst ihn geordnet schliessen kann.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=120
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

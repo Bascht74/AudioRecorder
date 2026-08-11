@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.wav
+karte.json
+sync.json
+schnitt-ausgabe/
+.DS_Store

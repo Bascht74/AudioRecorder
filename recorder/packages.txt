@@ -1,0 +1,19 @@
+# audiorec – benötigte Debian-Pakete für Raspberry Pi OS (Bookworm oder neuer)
+#
+# Direkt verwendbar mit:
+#   sudo apt-get install -y $(grep -v '^#' packages.txt | grep -v '^$')
+# oder komfortabler über ./install-packages.sh
+
+# --- Zwingend erforderlich ---
+alsa-utils          # arecord: die Aufnahme-Engine selbst
+python3             # Laufzeit für Dienst und Anzeige
+python3-tk          # Tkinter – ohne das startet die Statusanzeige nicht
+
+# --- Für die Nachbearbeitung ---
+ffmpeg              # Zerlegen der Mehrspurdateien in Einzelspuren
+
+# --- Betrieb und Fehlersuche ---
+tmux                # manuelle Aufnahmesitzung als Rückfallebene
+usbutils            # lsusb – prüfen, ob das Pult am Bus hängt
+rsync               # Material nach dem Abend wegkopieren
+exfatprogs          # exFAT-Sticks formatieren und pruefen

@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Zeigt /run/audiorec/status.json lesbar an.
+
+  audiorec-status          einmal ausgeben
+  audiorec-status -w       fortlaufend (jede Sekunde), Ende mit Strg-C
+  audiorec-status -c       jeden Kanal einzeln, statt einer VU-Zeile
+  audiorec-status -j       die rohe JSON, eingerueckt
+
+Kombinierbar:  audiorec-status -w -c
+"""
+import json
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, "/opt/audiorec")
+try:
+    import piwatch
+except ImportError:
+    piwatch = None
+
+PFAD = Path("/run/audiorec/status.json")
+
+FARBE = {"RECORDING": "\033[32m", "WAITING": "\033[33m", "STARTING": "\033[36m",
+         "STOPPING": "\033[36m", "ERROR": "\033[31m", "STOPPED": "\033[90m"}
+AUS = "\033[0m"
+BLOECKE = "·▁▂▃▄▅▆▇█"
+AUSFUEHRLICH = False
+
+
+def farbe_db(db):
+    if db is None:
+        return "\033[90m"
+    if db >= -1:
+        return "\033[31m"
+    if db >= -6:
+        return "\033[33m"
+    return "\033[32m" if db > -60 else "\033[90m"
+
+
+def block(db):
+    """Ein Zeichen je Kanal, Hoehe entspricht dem Pegel."""
+    if db is None or db <= -60:
+        return BLOECKE[0]
+    n = int(round((db + 60) / 60 * (len(BLOECKE) - 1)))
+    return BLOECKE[max(1, min(len(BLOECKE) - 1, n))]
+
+
+def hms(s):
+    s = int(max(0, s))
+    return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
+def dauer(stunden):
+    """Restlaufzeit lesbar: Sekunden sind hier belanglos."""
+    if stunden >= 48:
+        return f"{stunden / 24:.0f} Tage"
+    return f"{int(stunden)}:{int((stunden % 1) * 60):02d} h"
+
+
+def balken(db, breite=28):
+    """Kleiner Pegelbalken fuer die Konsole, -60 bis 0 dBFS."""
+    if db is None or db <= -60:
+        return "·" * breite
+    n = int(round((db + 60) / 60 * breite))
+    n = max(1, min(breite, n))
+    return "█" * n + "·" * (breite - n)
+
+
+def einmal(roh=False):
+    try:
+        d = json.loads(PFAD.read_text())
+    except FileNotFoundError:
+        print(f"{PFAD} gibt es nicht — laeuft der Dienst?  systemctl status audiorec")
+        return 1
+    except (OSError, ValueError) as e:
+        print(f"Status nicht lesbar: {e}")
+        return 1
+
+    if roh:
+        print(json.dumps(d, indent=2, ensure_ascii=False))
+        return 0
+
+    st = d.get("state", "?")
+    c = FARBE.get(st, "")
+    alt = time.time() - d.get("updated", 0)
+    print(f"{c}{st}{AUS}  {d.get('message', '')}"
+          + (f"   \033[31m(Status {alt:.0f}s alt!)\033[0m" if alt > 8 else ""))
+
+    ziel = d.get("target", "")
+    print(f"Ziel   {ziel}{'  [USB]' if d.get('target_is_usb') else ''}"
+          f"   {d.get('disk_free_gb', 0):.0f} von {d.get('disk_total_gb', 0):.0f} GB frei"
+          + (f"   reicht {dauer(d['remaining_h'])}"
+             f" (voll um {time.strftime('%H:%M', time.localtime(time.time() + d['remaining_h'] * 3600))})"
+             if 0 < d.get("remaining_h", 0) < 48 else
+             (f"   reicht {dauer(d['remaining_h'])}"
+              if d.get("remaining_h", 0) > 0 else "")))
+    if not d.get("clock_synced", True):
+        print("\033[33mUhr noch nicht per Netz gestellt — Dateinamen sind Zeitstempel!\033[0m")
+    if d.get("usb_candidate"):
+        print(f"\033[33mRueckfrage offen: {d['usb_candidate']}\033[0m")
+    # Systemwerte kommen aus dem Dienst; nur wenn er sie nicht liefert
+    # (aeltere Fassung), selbst messen.
+    w = d.get("system") or {}
+    if not w and piwatch is not None:
+        w = piwatch.alles(max_alter_s=0, ziel=d.get("target") or None)
+        w["warnung"] = piwatch.kritisch(w)
+        w["vorwarnung"] = piwatch.vorwarnung(w)
+        w["klartext"] = piwatch.zeile(w)
+    if w and not w.get("fehler"):
+        farbe = ("\033[31m" if w.get("warnung") else
+                 ("\033[33m" if w.get("vorwarnung") else ""))
+        print(f"System {farbe}{w.get('klartext', '')}{AUS}")
+        for art, schluessel in (("JETZT", "throttle_jetzt"),
+                                ("seit dem Start", "throttle_frueher")):
+            if w.get(schluessel):
+                print(f"       \033[31m{art}: {', '.join(w[schluessel])}\033[0m")
+        if w.get("load") is not None:
+            print(f"       Last {w['load']:.2f}"
+                  + (f" · Schreibstau {w['writeback_mb']:.0f} MB unterwegs"
+                     if w.get("writeback_mb") else "")
+                  + (f" · {w['disk_inflight']} Anfragen offen"
+                     if w.get("disk_inflight") else ""))
+
+    for g in d.get("devices", []):
+        print()
+        print(f"  \033[1m{g.get('card_name', '?')}\033[0m  {g.get('device', '')}"
+              f"   {g.get('channels', 0)} Kanaele · {g.get('rate', 0)} Hz"
+              f" · \033[1m{g.get('format', '')}\033[0m")
+        r, e = g.get("rate_mb_s", 0), g.get("expected_mb_s", 0)
+        ok = e <= 0 or r >= e * 0.85
+        print(f"    Rate    {r:.2f} / {e:.2f} MB/s"
+              + ("" if ok else "  \033[31mZU NIEDRIG\033[0m")
+              + f"    {g.get('files', 0)} Dateien · {g.get('bytes', 0) / 1e9:.2f} GB"
+                f" · {hms(g.get('elapsed_s', 0))}"
+              + (f" · je {g['max_file_time_s']} s" if g.get("max_file_time_s") else "")
+              + (f"   \033[33m{g['restarts']}x neu gestartet\033[0m"
+                 if g.get("restarts") else "")
+              + (f"   \033[33m{g['xruns']}x Aussetzer\033[0m"
+                 if g.get("xruns") else ""))
+        p, mx, avg = g.get("peak_dbfs"), g.get("max_dbfs"), g.get("avg_dbfs")
+        if p is not None:
+            fenster = int(g.get("max_window_s", 900) / 60)
+            print(f"    Pegel   {p:6.1f} dBFS"
+                  f"   max/{fenster}min {'  –   ' if mx is None else f'{mx:6.1f}'}"
+                  f"   Ø {'  –   ' if avg is None else f'{avg:6.1f}'}"
+                  f"   {g.get('active_channels', 0)}/{g.get('channels', 0)} aktiv"
+                  + (f"   \033[33m{g['clip_windows']}x Anschlag\033[0m"
+                     if g.get("clip_windows") else ""))
+        kan = g.get("channel_dbfs") or []
+        if kan and AUSFUEHRLICH:
+            for i, db in enumerate(kan, 1):
+                print(f"      {i:2d} {farbe_db(db)}{balken(db)}{AUS} {db:6.1f}")
+        elif kan:
+            # Alle Kanäle in einer Zeile: Höhe des Blocks = Pegel
+            zeile = "".join(f"{farbe_db(db)}{block(db)}{AUS}" for db in kan)
+            print(f"    VU      {zeile}")
+            print(f"    Kanal   " + "".join(
+                (str(i % 10) if i % 5 == 0 or i == 1 else "·")
+                for i in range(1, len(kan) + 1))
+                + "     (Einzelwerte:  audiorec-status -c)")
+        for f in g.get("recent_files", []):
+            print(f"      {'*' if f.get('active') else ' '} {f['name']}"
+                  f"   {f.get('bytes', 0) / 1e9:.2f} GB")
+        if g.get("last_error"):
+            print(f"    \033[31m{g['last_error']}\033[0m")
+    return 0
+
+
+def main():
+    global AUSFUEHRLICH
+    AUSFUEHRLICH = "-c" in sys.argv
+    roh = "-j" in sys.argv
+    if "-w" in sys.argv:
+        try:
+            while True:
+                print("\033[2J\033[H", end="")
+                einmal(roh)
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            print()
+        return 0
+    return einmal(roh)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
